@@ -32,6 +32,7 @@ static __initdata const void *mach_match_data;
 void __init prom_init(void)
 {
 	plat_get_fdt();
+	setup_8250_early_printk_port(0xb40003f8, 0, 0);
 	BUG_ON(!fdt);
 }
 
