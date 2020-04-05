@@ -40,6 +40,11 @@ void __init *plat_get_fdt(void)
 	const struct mips_machine *check_mach;
 	const struct of_device_id *match;
 
+#ifdef CONFIG_MIPS_ELF_APPENDED_DTB
+	extern const char __appended_dtb[];
+	if (!fdt) fdt = __appended_dtb;
+#endif
+
 	if (fdt)
 		/* Already set up */
 		return (void *)fdt;

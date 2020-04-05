@@ -17,3 +17,8 @@ obj-$(CONFIG_LEGACY_BOARD_SEAD3)	+= board-sead3.o
 obj-$(CONFIG_LEGACY_BOARD_OCELOT)	+= board-ocelot.o
 obj-$(CONFIG_KEXEC)			+= kexec.o
 obj-$(CONFIG_VIRT_BOARD_RANCHU)		+= board-ranchu.o
+
+obj-$(CONFIG_MIPS_ELF_APPENDED_DTB) += dtb.o
+arch/mips/generic/dtb.S:
+	make -C arch/mips/generic/dts
+.PHONY: arch/mips/generic/dtb.S

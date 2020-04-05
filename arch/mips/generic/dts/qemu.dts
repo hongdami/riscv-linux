@@ -1,0 +1,26 @@
+/dts-v1/;
+
+/ {
+	#address-cells = <1>;
+	#size-cells = <1>;
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		cpu@0 {
+			device_type = "cpu";
+			compatible = "mips,mips24Kc";
+			reg = <0>;
+		};
+	};
+
+	chosen {
+    bootargs = "earlycon";
+	};
+  memory {
+    device_type = "memory";
+    reg = <0x00000000 0x800000>;
+    linux-usable-memory = <0x0 0x800000>;
+  };
+};
