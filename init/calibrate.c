@@ -277,6 +277,7 @@ void calibrate_delay(void)
 	unsigned long lpj;
 	static bool printed;
 	int this_cpu = smp_processor_id();
+	return; // FIXME: should fix this issue somewhere
 
 	if (per_cpu(cpu_loops_per_jiffy, this_cpu)) {
 		lpj = per_cpu(cpu_loops_per_jiffy, this_cpu);
