@@ -29,6 +29,7 @@
 		i2c4 = &i2c4;
 		i2c5 = &i2c5;
 		i2c6 = &i2c6;
+		ethernet0 = &eth;
 	};
 
 	memory@80000000 {
@@ -65,6 +66,10 @@
 	status = "okay";
 };
 
+&sd {
+	status = "okay";
+};
+
 &eth {
 	status = "okay";
 	phy-handle = <&ethphy>;
@@ -76,6 +81,18 @@
 	};
 };
 
+&usb0 {
+	status = "okay";
+};
+
+&usb1 {
+	status = "okay";
+};
+
 &nand {
 	status = "okay";
+
+	nand@0 {
+		reg = <0>;
+	};
 };

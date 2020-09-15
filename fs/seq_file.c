@@ -6,6 +6,8 @@
  * initial implementation -- AV, Oct 2001.
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/cache.h>
 #include <linux/fs.h>
 #include <linux/export.h>
@@ -68,13 +70,6 @@ int seq_open(struct file *file, const struct seq_operations *op)
 	p->file = file;
 
 	/*
-	 * Wrappers around seq_open(e.g. swaps_open) need to be
-	 * aware of this. If they set f_version themselves, they
-	 * should call seq_open first and then set f_version.
-	 */
-	file->f_version = 0;
-
-	/*
 	 * seq_files support lseek() and pread().  They do not implement
 	 * write() at all, but we clear FMODE_PWRITE here for historical
 	 * reasons.
@@ -90,23 +85,21 @@ EXPORT_SYMBOL(seq_open);
 
 static int traverse(struct seq_file *m, loff_t offset)
 {
-	loff_t pos = 0, index;
+	loff_t pos = 0;
 	int error = 0;
 	void *p;
 
-	m->version = 0;
-	index = 0;
+	m->index = 0;
 	m->count = m->from = 0;
-	if (!offset) {
-		m->index = index;
+	if (!offset)
 		return 0;
-	}
+
 	if (!m->buf) {
 		m->buf = seq_buf_alloc(m->size = PAGE_SIZE);
 		if (!m->buf)
 			return -ENOMEM;
 	}
-	p = m->op->start(m, &index);
+	p = m->op->start(m, &m->index);
 	while (p) {
 		error = PTR_ERR(p);
 		if (IS_ERR(p))
@@ -120,23 +113,18 @@ static int traverse(struct seq_file *m, loff_t offset)
 		}
 		if (seq_has_overflowed(m))
 			goto Eoverflow;
+		p = m->op->next(m, p, &m->index);
 		if (pos + m->count > offset) {
 			m->from = offset - pos;
 			m->count -= m->from;
-			m->index = index;
 			break;
 		}
 		pos += m->count;
 		m->count = 0;
-		if (pos == offset) {
-			index++;
-			m->index = index;
+		if (pos == offset)
 			break;
-		}
-		p = m->op->next(m, p, &index);
 	}
 	m->op->stop(m, p);
-	m->index = index;
 	return error;
 
 Eoverflow:
@@ -160,7 +148,6 @@ ssize_t seq_read(struct file *file, char __user *buf, size_t size, loff_t *ppos)
 {
 	struct seq_file *m = file->private_data;
 	size_t copied = 0;
-	loff_t pos;
 	size_t n;
 	void *p;
 	int err = 0;
@@ -168,25 +155,11 @@ ssize_t seq_read(struct file *file, char __user *buf, size_t size, loff_t *ppos)
 	mutex_lock(&m->lock);
 
 	/*
-	 * seq_file->op->..m_start/m_stop/m_next may do special actions
-	 * or optimisations based on the file->f_version, so we want to
-	 * pass the file->f_version to those methods.
-	 *
-	 * seq_file->version is just copy of f_version, and seq_file
-	 * methods can treat it simply as file version.
-	 * It is copied in first and copied out after all operations.
-	 * It is convenient to have it as  part of structure to avoid the
-	 * need of passing another argument to all the seq_file methods.
-	 */
-	m->version = file->f_version;
-
-	/*
 	 * if request is to read from zero offset, reset iterator to first
 	 * record as it might have been already advanced by previous requests
 	 */
 	if (*ppos == 0) {
 		m->index = 0;
-		m->version = 0;
 		m->count = 0;
 	}
 
@@ -197,7 +170,6 @@ ssize_t seq_read(struct file *file, char __user *buf, size_t size, loff_t *ppos)
 		if (err) {
 			/* With prejudice... */
 			m->read_pos = 0;
-			m->version = 0;
 			m->index = 0;
 			m->count = 0;
 			goto Done;
@@ -223,16 +195,12 @@ ssize_t seq_read(struct file *file, char __user *buf, size_t size, loff_t *ppos)
 		size -= n;
 		buf += n;
 		copied += n;
-		if (!m->count) {
-			m->from = 0;
-			m->index++;
-		}
 		if (!size)
 			goto Done;
 	}
 	/* we need at least one record in buffer */
-	pos = m->index;
-	p = m->op->start(m, &pos);
+	m->from = 0;
+	p = m->op->start(m, &m->index);
 	while (1) {
 		err = PTR_ERR(p);
 		if (!p || IS_ERR(p))
@@ -243,8 +211,7 @@ ssize_t seq_read(struct file *file, char __user *buf, size_t size, loff_t *ppos)
 		if (unlikely(err))
 			m->count = 0;
 		if (unlikely(!m->count)) {
-			p = m->op->next(m, p, &pos);
-			m->index = pos;
+			p = m->op->next(m, p, &m->index);
 			continue;
 		}
 		if (m->count < m->size)
@@ -255,30 +222,35 @@ ssize_t seq_read(struct file *file, char __user *buf, size_t size, loff_t *ppos)
 		m->buf = seq_buf_alloc(m->size <<= 1);
 		if (!m->buf)
 			goto Enomem;
-		m->version = 0;
-		pos = m->index;
-		p = m->op->start(m, &pos);
+		p = m->op->start(m, &m->index);
 	}
 	m->op->stop(m, p);
 	m->count = 0;
 	goto Done;
 Fill:
 	/* they want more? let's try to get some more */
-	while (m->count < size) {
+	while (1) {
 		size_t offs = m->count;
-		loff_t next = pos;
-		p = m->op->next(m, p, &next);
+		loff_t pos = m->index;
+
+		p = m->op->next(m, p, &m->index);
+		if (pos == m->index) {
+			pr_info_ratelimited("buggy .next function %ps did not update position index\n",
+					    m->op->next);
+			m->index++;
+		}
 		if (!p || IS_ERR(p)) {
 			err = PTR_ERR(p);
 			break;
 		}
+		if (m->count >= size)
+			break;
 		err = m->op->show(m, p);
 		if (seq_has_overflowed(m) || err) {
 			m->count = offs;
 			if (likely(err <= 0))
 				break;
 		}
-		pos = next;
 	}
 	m->op->stop(m, p);
 	n = min(m->count, size);
@@ -287,11 +259,7 @@ Fill:
 		goto Efault;
 	copied += n;
 	m->count -= n;
-	if (m->count)
-		m->from = n;
-	else
-		pos++;
-	m->index = pos;
+	m->from = n;
 Done:
 	if (!copied)
 		copied = err;
@@ -299,7 +267,6 @@ Done:
 		*ppos += copied;
 		m->read_pos += copied;
 	}
-	file->f_version = m->version;
 	mutex_unlock(&m->lock);
 	return copied;
 Enomem:
@@ -325,10 +292,10 @@ loff_t seq_lseek(struct file *file, loff_t offset, int whence)
 	loff_t retval = -EINVAL;
 
 	mutex_lock(&m->lock);
-	m->version = file->f_version;
 	switch (whence) {
 	case SEEK_CUR:
 		offset += file->f_pos;
+		/* fall through */
 	case SEEK_SET:
 		if (offset < 0)
 			break;
@@ -340,7 +307,6 @@ loff_t seq_lseek(struct file *file, loff_t offset, int whence)
 				/* with extreme prejudice... */
 				file->f_pos = 0;
 				m->read_pos = 0;
-				m->version = 0;
 				m->index = 0;
 				m->count = 0;
 			} else {
@@ -351,7 +317,6 @@ loff_t seq_lseek(struct file *file, loff_t offset, int whence)
 			file->f_pos = offset;
 		}
 	}
-	file->f_version = m->version;
 	mutex_unlock(&m->lock);
 	return retval;
 }
@@ -394,6 +359,17 @@ void seq_escape(struct seq_file *m, const char *s, const char *esc)
 	seq_commit(m, ret < size ? ret : -1);
 }
 EXPORT_SYMBOL(seq_escape);
+
+void seq_escape_mem_ascii(struct seq_file *m, const char *src, size_t isz)
+{
+	char *buf;
+	size_t size = seq_get_buf(m, &buf);
+	int ret;
+
+	ret = string_escape_mem_ascii(src, isz, buf, size);
+	seq_commit(m, ret < size ? ret : -1);
+}
+EXPORT_SYMBOL(seq_escape_mem_ascii);
 
 void seq_vprintf(struct seq_file *m, const char *f, va_list args)
 {

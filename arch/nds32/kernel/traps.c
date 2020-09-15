@@ -8,9 +8,11 @@
 #include <linux/kdebug.h>
 #include <linux/sched/task_stack.h>
 #include <linux/uaccess.h>
+#include <linux/ftrace.h>
 
 #include <asm/proc-fns.h>
 #include <asm/unistd.h>
+#include <asm/fpu.h>
 
 #include <linux/ptrace.h>
 #include <nds32_intrinsic.h>
@@ -94,40 +96,20 @@ static void dump_instr(struct pt_regs *regs)
 	set_fs(fs);
 }
 
-#ifdef CONFIG_FUNCTION_GRAPH_TRACER
-#include <linux/ftrace.h>
-static void
-get_real_ret_addr(unsigned long *addr, struct task_struct *tsk, int *graph)
-{
-	if (*addr == (unsigned long)return_to_handler) {
-		int index = tsk->curr_ret_stack;
-
-		if (tsk->ret_stack && index >= *graph) {
-			index -= *graph;
-			*addr = tsk->ret_stack[index].ret;
-			(*graph)++;
-		}
-	}
-}
-#else
-static inline void
-get_real_ret_addr(unsigned long *addr, struct task_struct *tsk, int *graph)
-{
-}
-#endif
-
 #define LOOP_TIMES (100)
-static void __dump(struct task_struct *tsk, unsigned long *base_reg)
+static void __dump(struct task_struct *tsk, unsigned long *base_reg,
+		   const char *loglvl)
 {
 	unsigned long ret_addr;
 	int cnt = LOOP_TIMES, graph = 0;
-	pr_emerg("Call Trace:\n");
+	printk("%sCall Trace:\n", loglvl);
 	if (!IS_ENABLED(CONFIG_FRAME_POINTER)) {
 		while (!kstack_end(base_reg)) {
 			ret_addr = *base_reg++;
 			if (__kernel_text_address(ret_addr)) {
-				get_real_ret_addr(&ret_addr, tsk, &graph);
-				print_ip_sym(ret_addr);
+				ret_addr = ftrace_graph_ret_addr(
+						tsk, &graph, ret_addr, NULL);
+				print_ip_sym(loglvl, ret_addr);
 			}
 			if (--cnt < 0)
 				break;
@@ -137,26 +119,23 @@ static void __dump(struct task_struct *tsk, unsigned long *base_reg)
 		       !((unsigned long)base_reg & 0x3) &&
 		       ((unsigned long)base_reg >= TASK_SIZE)) {
 			unsigned long next_fp;
-#if !defined(NDS32_ABI_2)
-			ret_addr = base_reg[0];
-			next_fp = base_reg[1];
-#else
-			ret_addr = base_reg[-1];
+			ret_addr = base_reg[LP_OFFSET];
 			next_fp = base_reg[FP_OFFSET];
-#endif
 			if (__kernel_text_address(ret_addr)) {
-				get_real_ret_addr(&ret_addr, tsk, &graph);
-				print_ip_sym(ret_addr);
+
+				ret_addr = ftrace_graph_ret_addr(
+						tsk, &graph, ret_addr, NULL);
+				print_ip_sym(loglvl, ret_addr);
 			}
 			if (--cnt < 0)
 				break;
 			base_reg = (unsigned long *)next_fp;
 		}
 	}
-	pr_emerg("\n");
+	printk("%s\n", loglvl);
 }
 
-void show_stack(struct task_struct *tsk, unsigned long *sp)
+void show_stack(struct task_struct *tsk, unsigned long *sp, const char *loglvl)
 {
 	unsigned long *base_reg;
 
@@ -173,7 +152,7 @@ void show_stack(struct task_struct *tsk, unsigned long *sp)
 		else
 			__asm__ __volatile__("\tori\t%0, $fp, #0\n":"=r"(base_reg));
 	}
-	__dump(tsk, base_reg);
+	__dump(tsk, base_reg, loglvl);
 	barrier();
 }
 
@@ -196,11 +175,10 @@ void die(const char *str, struct pt_regs *regs, int err)
 	pr_emerg("CPU: %i\n", smp_processor_id());
 	show_regs(regs);
 	pr_emerg("Process %s (pid: %d, stack limit = 0x%p)\n",
-		 tsk->comm, tsk->pid, task_thread_info(tsk) + 1);
+		 tsk->comm, tsk->pid, end_of_stack(tsk));
 
 	if (!user_mode(regs) || in_interrupt()) {
-		dump_mem("Stack: ", regs->sp,
-			 THREAD_SIZE + (unsigned long)task_thread_info(tsk));
+		dump_mem("Stack: ", regs->sp, (regs->sp + PAGE_SIZE) & PAGE_MASK);
 		dump_instr(regs);
 		dump_stack();
 	}
@@ -228,7 +206,7 @@ int bad_syscall(int n, struct pt_regs *regs)
 	}
 
 	force_sig_fault(SIGILL, ILL_ILLTRP,
-			(void __user *)instruction_pointer(regs) - 4, current);
+			(void __user *)instruction_pointer(regs) - 4);
 	die_if_kernel("Oops - bad syscall", regs, n);
 	return regs->uregs[0];
 }
@@ -278,14 +256,15 @@ void __init early_trap_init(void)
 	cpu_cache_wbinval_page(base, true);
 }
 
-void send_sigtrap(struct task_struct *tsk, struct pt_regs *regs,
-		  int error_code, int si_code)
+static void send_sigtrap(struct pt_regs *regs, int error_code, int si_code)
 {
+	struct task_struct *tsk = current;
+
 	tsk->thread.trap_no = ENTRY_DEBUG_RELATED;
 	tsk->thread.error_code = error_code;
 
 	force_sig_fault(SIGTRAP, si_code,
-			(void __user *)instruction_pointer(regs), tsk);
+			(void __user *)instruction_pointer(regs));
 }
 
 void do_debug_trap(unsigned long entry, unsigned long addr,
@@ -297,7 +276,7 @@ void do_debug_trap(unsigned long entry, unsigned long addr,
 
 	if (user_mode(regs)) {
 		/* trap_signal */
-		send_sigtrap(current, regs, 0, TRAP_BRKPT);
+		send_sigtrap(regs, 0, TRAP_BRKPT);
 	} else {
 		/* kernel_trap */
 		if (!fixup_exception(regs))
@@ -311,7 +290,7 @@ void unhandled_interruption(struct pt_regs *regs)
 	show_regs(regs);
 	if (!user_mode(regs))
 		do_exit(SIGKILL);
-	force_sig(SIGKILL, current);
+	force_sig(SIGKILL);
 }
 
 void unhandled_exceptions(unsigned long entry, unsigned long addr,
@@ -322,7 +301,7 @@ void unhandled_exceptions(unsigned long entry, unsigned long addr,
 	show_regs(regs);
 	if (!user_mode(regs))
 		do_exit(SIGKILL);
-	force_sig(SIGKILL, current);
+	force_sig(SIGKILL);
 }
 
 extern int do_page_fault(unsigned long entry, unsigned long addr,
@@ -349,7 +328,7 @@ void do_revinsn(struct pt_regs *regs)
 	show_regs(regs);
 	if (!user_mode(regs))
 		do_exit(SIGILL);
-	force_sig(SIGILL, current);
+	force_sig(SIGILL);
 }
 
 #ifdef CONFIG_ALIGNMENT_TRAP
@@ -381,6 +360,21 @@ void do_dispatch_general(unsigned long entry, unsigned long addr,
 	} else if (type == ETYPE_RESERVED_INSTRUCTION) {
 		/* Reserved instruction */
 		do_revinsn(regs);
+	} else if (type == ETYPE_COPROCESSOR) {
+		/* Coprocessor */
+#if IS_ENABLED(CONFIG_FPU)
+		unsigned int fucop_exist = __nds32__mfsr(NDS32_SR_FUCOP_EXIST);
+		unsigned int cpid = ((itype & ITYPE_mskCPID) >> ITYPE_offCPID);
+
+		if ((cpid == FPU_CPID) &&
+		    (fucop_exist & FUCOP_EXIST_mskCP0ISFPU)) {
+			unsigned int subtype = (itype & ITYPE_mskSTYPE);
+
+			if (true == do_fpu_exception(subtype, regs))
+				return;
+		}
+#endif
+		unhandled_exceptions(entry, addr, type, regs);
 	} else if (type == ETYPE_TRAP && swid == SWID_RAISE_INTERRUPT_LEVEL) {
 		/* trap, used on v3 EDM target debugging workaround */
 		/*

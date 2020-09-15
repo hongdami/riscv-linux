@@ -111,6 +111,7 @@ struct rdma_cm_event {
 		struct rdma_conn_param	conn;
 		struct rdma_ud_param	ud;
 	} param;
+	struct rdma_ucm_ece ece;
 };
 
 struct rdma_cm_id;
@@ -152,7 +153,11 @@ struct rdma_cm_id *__rdma_create_id(struct net *net,
  * @ps: RDMA port space.
  * @qp_type: type of queue pair associated with the id.
  *
- * The id holds a reference on the network namespace until it is destroyed.
+ * Returns a new rdma_cm_id. The id holds a reference on the network
+ * namespace until it is destroyed.
+ *
+ * The event handler callback serializes on the id's mutex and is
+ * allowed to sleep.
  */
 #define rdma_create_id(net, event_handler, context, ps, qp_type) \
 	__rdma_create_id((net), (event_handler), (context), (ps), (qp_type), \
@@ -192,7 +197,8 @@ int rdma_bind_addr(struct rdma_cm_id *id, struct sockaddr *addr);
  * @timeout_ms: Time to wait for resolution to complete.
  */
 int rdma_resolve_addr(struct rdma_cm_id *id, struct sockaddr *src_addr,
-		      struct sockaddr *dst_addr, int timeout_ms);
+		      const struct sockaddr *dst_addr,
+		      unsigned long timeout_ms);
 
 /**
  * rdma_resolve_route - Resolve the RDMA address bound to the RDMA identifier
@@ -202,7 +208,7 @@ int rdma_resolve_addr(struct rdma_cm_id *id, struct sockaddr *src_addr,
  * Users must have first called rdma_resolve_addr to resolve a dst_addr
  * into an RDMA address before calling this routine.
  */
-int rdma_resolve_route(struct rdma_cm_id *id, int timeout_ms);
+int rdma_resolve_route(struct rdma_cm_id *id, unsigned long timeout_ms);
 
 /**
  * rdma_create_qp - Allocate a QP and associate it with the specified RDMA
@@ -259,6 +265,9 @@ int rdma_init_qp_attr(struct rdma_cm_id *id, struct ib_qp_attr *qp_attr,
  */
 int rdma_connect(struct rdma_cm_id *id, struct rdma_conn_param *conn_param);
 
+int rdma_connect_ece(struct rdma_cm_id *id, struct rdma_conn_param *conn_param,
+		     struct rdma_ucm_ece *ece);
+
 /**
  * rdma_listen - This function is called by the passive side to
  *   listen for incoming connection requests.
@@ -270,6 +279,9 @@ int rdma_listen(struct rdma_cm_id *id, int backlog);
 
 int __rdma_accept(struct rdma_cm_id *id, struct rdma_conn_param *conn_param,
 		  const char *caller);
+
+int __rdma_accept_ece(struct rdma_cm_id *id, struct rdma_conn_param *conn_param,
+		      const char *caller, struct rdma_ucm_ece *ece);
 
 /**
  * rdma_accept - Called to accept a connection request or response.
@@ -308,7 +320,7 @@ int rdma_notify(struct rdma_cm_id *id, enum ib_event_type event);
  * rdma_reject - Called to reject a connection request or response.
  */
 int rdma_reject(struct rdma_cm_id *id, const void *private_data,
-		u8 private_data_len);
+		u8 private_data_len, u8 reason);
 
 /**
  * rdma_disconnect - This function disconnects the associated QP and
@@ -369,6 +381,7 @@ int rdma_set_reuseaddr(struct rdma_cm_id *id, int reuse);
  */
 int rdma_set_afonly(struct rdma_cm_id *id, int afonly);
 
+int rdma_set_ack_timeout(struct rdma_cm_id *id, u8 timeout);
  /**
  * rdma_get_service_id - Return the IB service ID for a specified address.
  * @id: Communication identifier associated with the address.
@@ -383,14 +396,6 @@ __be64 rdma_get_service_id(struct rdma_cm_id *id, struct sockaddr *addr);
  */
 const char *__attribute_const__ rdma_reject_msg(struct rdma_cm_id *id,
 						int reason);
-/**
- * rdma_is_consumer_reject - return true if the consumer rejected the connect
- *                           request.
- * @id: Communication identifier that received the REJECT event.
- * @reason: Value returned in the REJECT event status field.
- */
-bool rdma_is_consumer_reject(struct rdma_cm_id *id, int reason);
-
 /**
  * rdma_consumer_reject_data - return the consumer reject private data and
  *			       length, if any.

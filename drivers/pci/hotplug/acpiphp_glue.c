@@ -5,7 +5,7 @@
  * Copyright (C) 2002,2003 Takayoshi Kochi (t-kochi@bq.jp.nec.com)
  * Copyright (C) 2002 Hiroshi Aono (h-aono@ap.jp.nec.com)
  * Copyright (C) 2002,2003 NEC Corporation
- * Copyright (C) 2003-2005 Matthew Wilcox (matthew.wilcox@hp.com)
+ * Copyright (C) 2003-2005 Matthew Wilcox (willy@infradead.org)
  * Copyright (C) 2003-2005 Hewlett Packard
  * Copyright (C) 2005 Rajesh Shah (rajesh.shah@intel.com)
  * Copyright (C) 2005 Intel Corporation
@@ -385,19 +385,12 @@ static unsigned char acpiphp_max_busnr(struct pci_bus *bus)
 static void acpiphp_set_acpi_region(struct acpiphp_slot *slot)
 {
 	struct acpiphp_func *func;
-	union acpi_object params[2];
-	struct acpi_object_list arg_list;
 
 	list_for_each_entry(func, &slot->funcs, sibling) {
-		arg_list.count = 2;
-		arg_list.pointer = params;
-		params[0].type = ACPI_TYPE_INTEGER;
-		params[0].integer.value = ACPI_ADR_SPACE_PCI_CONFIG;
-		params[1].type = ACPI_TYPE_INTEGER;
-		params[1].integer.value = 1;
 		/* _REG is optional, we don't care about if there is failure */
-		acpi_evaluate_object(func_to_handle(func), "_REG", &arg_list,
-				     NULL);
+		acpi_evaluate_reg(func_to_handle(func),
+				  ACPI_ADR_SPACE_PCI_CONFIG,
+				  ACPI_REG_CONNECT);
 	}
 }
 
@@ -449,25 +442,33 @@ static void acpiphp_native_scan_bridge(struct pci_dev *bridge)
 
 	/* Scan non-hotplug bridges that need to be reconfigured */
 	for_each_pci_bridge(dev, bus) {
-		if (!hotplug_is_native(dev))
-			max = pci_scan_bridge(bus, dev, max, 1);
+		if (hotplug_is_native(dev))
+			continue;
+
+		max = pci_scan_bridge(bus, dev, max, 1);
+		if (dev->subordinate) {
+			pcibios_resource_survey_bus(dev->subordinate);
+			pci_bus_size_bridges(dev->subordinate);
+			pci_bus_assign_resources(dev->subordinate);
+		}
 	}
 }
 
 /**
  * enable_slot - enable, configure a slot
  * @slot: slot to be enabled
+ * @bridge: true if enable is for the whole bridge (not a single slot)
  *
  * This function should be called per *physical slot*,
  * not per each slot object in ACPI namespace.
  */
-static void enable_slot(struct acpiphp_slot *slot)
+static void enable_slot(struct acpiphp_slot *slot, bool bridge)
 {
 	struct pci_dev *dev;
 	struct pci_bus *bus = slot->bus;
 	struct acpiphp_func *func;
 
-	if (bus->self && hotplug_is_native(bus->self)) {
+	if (bridge && bus->self && hotplug_is_native(bus->self)) {
 		/*
 		 * If native hotplug is used, it will take care of hotplug
 		 * slot management and resource allocation for hotplug
@@ -479,7 +480,6 @@ static void enable_slot(struct acpiphp_slot *slot)
 			if (PCI_SLOT(dev->devfn) == slot->device)
 				acpiphp_native_scan_bridge(dev);
 		}
-		pci_assign_unassigned_bridge_resources(bus->self);
 	} else {
 		LIST_HEAD(add_list);
 		int max, pass;
@@ -701,7 +701,7 @@ static void acpiphp_check_bridge(struct acpiphp_bridge *bridge)
 					trim_stale_devices(dev);
 
 			/* configure all functions */
-			enable_slot(slot);
+			enable_slot(slot, true);
 		} else {
 			disable_slot(slot);
 		}
@@ -785,7 +785,7 @@ static void hotplug_event(u32 type, struct acpiphp_context *context)
 		if (bridge)
 			acpiphp_check_bridge(bridge);
 		else if (!(slot->flags & SLOT_IS_GOING_AWAY))
-			enable_slot(slot);
+			enable_slot(slot, false);
 
 		break;
 
@@ -973,7 +973,7 @@ int acpiphp_enable_slot(struct acpiphp_slot *slot)
 
 	/* configure all functions */
 	if (!(slot->flags & SLOT_ENABLED))
-		enable_slot(slot);
+		enable_slot(slot, false);
 
 	pci_unlock_rescan_remove();
 	return 0;

@@ -44,8 +44,10 @@
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/string.h>
+#include <linux/if_vlan.h>
 #include "qed.h"
 #include "qed_cxt.h"
+#include "qed_dcbx.h"
 #include "qed_hsi.h"
 #include "qed_hw.h"
 #include "qed_init_ops.h"
@@ -111,7 +113,6 @@ void qed_roce_stop(struct qed_hwfn *p_hwfn)
 			break;
 		}
 	}
-	qed_spq_unregister_async_cb(p_hwfn, PROTOCOLID_ROCE);
 }
 
 static void qed_rdma_copy_gids(struct qed_rdma_qp *qp, __le32 *src_gid,
@@ -138,26 +139,19 @@ static void qed_rdma_copy_gids(struct qed_rdma_qp *qp, __le32 *src_gid,
 
 static enum roce_flavor qed_roce_mode_to_flavor(enum roce_mode roce_mode)
 {
-	enum roce_flavor flavor;
-
 	switch (roce_mode) {
 	case ROCE_V1:
-		flavor = PLAIN_ROCE;
-		break;
+		return PLAIN_ROCE;
 	case ROCE_V2_IPV4:
-		flavor = RROCE_IPV4;
-		break;
+		return RROCE_IPV4;
 	case ROCE_V2_IPV6:
-		flavor = ROCE_V2_IPV6;
-		break;
+		return RROCE_IPV6;
 	default:
-		flavor = MAX_ROCE_MODE;
-		break;
+		return MAX_ROCE_FLAVOR;
 	}
-	return flavor;
 }
 
-void qed_roce_free_cid_pair(struct qed_hwfn *p_hwfn, u16 cid)
+static void qed_roce_free_cid_pair(struct qed_hwfn *p_hwfn, u16 cid)
 {
 	spin_lock_bh(&p_hwfn->p_rdma_info->lock);
 	qed_bmap_release_id(p_hwfn, &p_hwfn->p_rdma_info->cid_map, cid);
@@ -231,16 +225,36 @@ static void qed_roce_set_real_cid(struct qed_hwfn *p_hwfn, u32 cid)
 	spin_unlock_bh(&p_hwfn->p_rdma_info->lock);
 }
 
+static u8 qed_roce_get_qp_tc(struct qed_hwfn *p_hwfn, struct qed_rdma_qp *qp)
+{
+	u8 pri, tc = 0;
+
+	if (qp->vlan_id) {
+		pri = (qp->vlan_id & VLAN_PRIO_MASK) >> VLAN_PRIO_SHIFT;
+		tc = qed_dcbx_get_priority_tc(p_hwfn, pri);
+	}
+
+	DP_VERBOSE(p_hwfn, QED_MSG_SP,
+		   "qp icid %u tc: %u (vlan priority %s)\n",
+		   qp->icid, tc, qp->vlan_id ? "enabled" : "disabled");
+
+	return tc;
+}
+
 static int qed_roce_sp_create_responder(struct qed_hwfn *p_hwfn,
 					struct qed_rdma_qp *qp)
 {
 	struct roce_create_qp_resp_ramrod_data *p_ramrod;
+	u16 regular_latency_queue, low_latency_queue;
 	struct qed_sp_init_data init_data;
 	enum roce_flavor roce_flavor;
 	struct qed_spq_entry *p_ent;
-	u16 regular_latency_queue;
 	enum protocol_type proto;
 	int rc;
+	u8 tc;
+
+	if (!qp->has_resp)
+		return 0;
 
 	DP_VERBOSE(p_hwfn, QED_MSG_RDMA, "icid = %08x\n", qp->icid);
 
@@ -303,6 +317,10 @@ static int qed_roce_sp_create_responder(struct qed_hwfn *p_hwfn,
 		  ROCE_CREATE_QP_RESP_RAMROD_DATA_MIN_RNR_NAK_TIMER,
 		  qp->min_rnr_nak_timer);
 
+	SET_FIELD(p_ramrod->flags,
+		  ROCE_CREATE_QP_RESP_RAMROD_DATA_XRC_FLAG,
+		  qed_rdma_is_xrc_qp(qp));
+
 	p_ramrod->max_ird = qp->max_rd_atomic_resp;
 	p_ramrod->traffic_class = qp->traffic_class_tos;
 	p_ramrod->hop_limit = qp->hop_limit_ttl;
@@ -323,13 +341,19 @@ static int qed_roce_sp_create_responder(struct qed_hwfn *p_hwfn,
 	p_ramrod->qp_handle_for_cqe.lo = cpu_to_le32(qp->qp_handle.lo);
 	p_ramrod->cq_cid = cpu_to_le32((p_hwfn->hw_info.opaque_fid << 16) |
 				       qp->rq_cq_id);
+	p_ramrod->xrc_domain = cpu_to_le16(qp->xrcd_id);
 
-	regular_latency_queue = qed_get_cm_pq_idx(p_hwfn, PQ_FLAGS_OFLD);
-
+	tc = qed_roce_get_qp_tc(p_hwfn, qp);
+	regular_latency_queue = qed_get_cm_pq_idx_ofld_mtc(p_hwfn, tc);
+	low_latency_queue = qed_get_cm_pq_idx_llt_mtc(p_hwfn, tc);
+	DP_VERBOSE(p_hwfn, QED_MSG_SP,
+		   "qp icid %u pqs: regular_latency %u low_latency %u\n",
+		   qp->icid, regular_latency_queue - CM_TX_PQ_BASE,
+		   low_latency_queue - CM_TX_PQ_BASE);
 	p_ramrod->regular_latency_phy_queue =
 	    cpu_to_le16(regular_latency_queue);
 	p_ramrod->low_latency_phy_queue =
-	    cpu_to_le16(regular_latency_queue);
+	    cpu_to_le16(low_latency_queue);
 
 	p_ramrod->dpi = cpu_to_le16(qp->dpi);
 
@@ -345,11 +369,6 @@ static int qed_roce_sp_create_responder(struct qed_hwfn *p_hwfn,
 				     qp->stats_queue;
 
 	rc = qed_spq_post(p_hwfn, p_ent, NULL);
-
-	DP_VERBOSE(p_hwfn, QED_MSG_RDMA,
-		   "rc = %d regular physical queue = 0x%x\n", rc,
-		   regular_latency_queue);
-
 	if (rc)
 		goto err;
 
@@ -375,12 +394,16 @@ static int qed_roce_sp_create_requester(struct qed_hwfn *p_hwfn,
 					struct qed_rdma_qp *qp)
 {
 	struct roce_create_qp_req_ramrod_data *p_ramrod;
+	u16 regular_latency_queue, low_latency_queue;
 	struct qed_sp_init_data init_data;
 	enum roce_flavor roce_flavor;
 	struct qed_spq_entry *p_ent;
-	u16 regular_latency_queue;
 	enum protocol_type proto;
 	int rc;
+	u8 tc;
+
+	if (!qp->has_req)
+		return 0;
 
 	DP_VERBOSE(p_hwfn, QED_MSG_RDMA, "icid = %08x\n", qp->icid);
 
@@ -431,6 +454,13 @@ static int qed_roce_sp_create_requester(struct qed_hwfn *p_hwfn,
 		  ROCE_CREATE_QP_REQ_RAMROD_DATA_RNR_NAK_CNT,
 		  qp->rnr_retry_cnt);
 
+	SET_FIELD(p_ramrod->flags,
+		  ROCE_CREATE_QP_REQ_RAMROD_DATA_XRC_FLAG,
+		  qed_rdma_is_xrc_qp(qp));
+
+	SET_FIELD(p_ramrod->flags2,
+		  ROCE_CREATE_QP_REQ_RAMROD_DATA_EDPM_MODE, qp->edpm_mode);
+
 	p_ramrod->max_ord = qp->max_rd_atomic_req;
 	p_ramrod->traffic_class = qp->traffic_class_tos;
 	p_ramrod->hop_limit = qp->hop_limit_ttl;
@@ -453,12 +483,17 @@ static int qed_roce_sp_create_requester(struct qed_hwfn *p_hwfn,
 	p_ramrod->cq_cid =
 	    cpu_to_le32((p_hwfn->hw_info.opaque_fid << 16) | qp->sq_cq_id);
 
-	regular_latency_queue = qed_get_cm_pq_idx(p_hwfn, PQ_FLAGS_OFLD);
-
+	tc = qed_roce_get_qp_tc(p_hwfn, qp);
+	regular_latency_queue = qed_get_cm_pq_idx_ofld_mtc(p_hwfn, tc);
+	low_latency_queue = qed_get_cm_pq_idx_llt_mtc(p_hwfn, tc);
+	DP_VERBOSE(p_hwfn, QED_MSG_SP,
+		   "qp icid %u pqs: regular_latency %u low_latency %u\n",
+		   qp->icid, regular_latency_queue - CM_TX_PQ_BASE,
+		   low_latency_queue - CM_TX_PQ_BASE);
 	p_ramrod->regular_latency_phy_queue =
 	    cpu_to_le16(regular_latency_queue);
 	p_ramrod->low_latency_phy_queue =
-	    cpu_to_le16(regular_latency_queue);
+	    cpu_to_le16(low_latency_queue);
 
 	p_ramrod->dpi = cpu_to_le16(qp->dpi);
 
@@ -471,9 +506,6 @@ static int qed_roce_sp_create_requester(struct qed_hwfn *p_hwfn,
 				     qp->stats_queue;
 
 	rc = qed_spq_post(p_hwfn, p_ent, NULL);
-
-	DP_VERBOSE(p_hwfn, QED_MSG_RDMA, "rc = %d\n", rc);
-
 	if (rc)
 		goto err;
 
@@ -501,6 +533,9 @@ static int qed_roce_sp_modify_responder(struct qed_hwfn *p_hwfn,
 	struct qed_sp_init_data init_data;
 	struct qed_spq_entry *p_ent;
 	int rc;
+
+	if (!qp->has_resp)
+		return 0;
 
 	DP_VERBOSE(p_hwfn, QED_MSG_RDMA, "icid = %08x\n", qp->icid);
 
@@ -596,6 +631,9 @@ static int qed_roce_sp_modify_requester(struct qed_hwfn *p_hwfn,
 	struct qed_spq_entry *p_ent;
 	int rc;
 
+	if (!qp->has_req)
+		return 0;
+
 	DP_VERBOSE(p_hwfn, QED_MSG_RDMA, "icid = %08x\n", qp->icid);
 
 	if (move_to_err && !(qp->req_offloaded))
@@ -690,6 +728,11 @@ static int qed_roce_sp_destroy_qp_responder(struct qed_hwfn *p_hwfn,
 	dma_addr_t ramrod_res_phys;
 	int rc;
 
+	if (!qp->has_resp) {
+		*cq_prod = 0;
+		return 0;
+	}
+
 	DP_VERBOSE(p_hwfn, QED_MSG_RDMA, "icid = %08x\n", qp->icid);
 	*cq_prod = qp->cq_prod;
 
@@ -721,15 +764,16 @@ static int qed_roce_sp_destroy_qp_responder(struct qed_hwfn *p_hwfn,
 
 	p_ramrod = &p_ent->ramrod.roce_destroy_qp_resp;
 
-	p_ramrod_res = (struct roce_destroy_qp_resp_output_params *)
-	    dma_alloc_coherent(&p_hwfn->cdev->pdev->dev, sizeof(*p_ramrod_res),
-			       &ramrod_res_phys, GFP_KERNEL);
+	p_ramrod_res = dma_alloc_coherent(&p_hwfn->cdev->pdev->dev,
+					  sizeof(*p_ramrod_res),
+					  &ramrod_res_phys, GFP_KERNEL);
 
 	if (!p_ramrod_res) {
 		rc = -ENOMEM;
 		DP_NOTICE(p_hwfn,
 			  "qed destroy responder failed: cannot allocate memory (ramrod). rc = %d\n",
 			  rc);
+		qed_sp_destroy_request(p_hwfn, p_ent);
 		return rc;
 	}
 
@@ -768,6 +812,9 @@ static int qed_roce_sp_destroy_qp_requester(struct qed_hwfn *p_hwfn,
 	struct qed_spq_entry *p_ent;
 	dma_addr_t ramrod_res_phys;
 	int rc = -ENOMEM;
+
+	if (!qp->has_req)
+		return 0;
 
 	DP_VERBOSE(p_hwfn, QED_MSG_RDMA, "icid = %08x\n", qp->icid);
 
@@ -856,10 +903,10 @@ int qed_roce_query_qp(struct qed_hwfn *p_hwfn,
 	}
 
 	/* Send a query responder ramrod to FW to get RQ-PSN and state */
-	p_resp_ramrod_res = (struct roce_query_qp_resp_output_params *)
-	    dma_alloc_coherent(&p_hwfn->cdev->pdev->dev,
-			       sizeof(*p_resp_ramrod_res),
-			       &resp_ramrod_res_phys, GFP_KERNEL);
+	p_resp_ramrod_res =
+		dma_alloc_coherent(&p_hwfn->cdev->pdev->dev,
+				   sizeof(*p_resp_ramrod_res),
+				   &resp_ramrod_res_phys, GFP_KERNEL);
 	if (!p_resp_ramrod_res) {
 		DP_NOTICE(p_hwfn,
 			  "qed query qp failed: cannot allocate memory (ramrod)\n");
@@ -884,7 +931,7 @@ int qed_roce_query_qp(struct qed_hwfn *p_hwfn,
 		goto err_resp;
 
 	out_params->rq_psn = le32_to_cpu(p_resp_ramrod_res->psn);
-	rq_err_state = GET_FIELD(le32_to_cpu(p_resp_ramrod_res->err_flag),
+	rq_err_state = GET_FIELD(le32_to_cpu(p_resp_ramrod_res->flags),
 				 ROCE_QUERY_QP_RESP_OUTPUT_PARAMS_ERROR_FLG);
 
 	dma_free_coherent(&p_hwfn->cdev->pdev->dev, sizeof(*p_resp_ramrod_res),
@@ -904,8 +951,7 @@ int qed_roce_query_qp(struct qed_hwfn *p_hwfn,
 	}
 
 	/* Send a query requester ramrod to FW to get SQ-PSN and state */
-	p_req_ramrod_res = (struct roce_query_qp_req_output_params *)
-			   dma_alloc_coherent(&p_hwfn->cdev->pdev->dev,
+	p_req_ramrod_res = dma_alloc_coherent(&p_hwfn->cdev->pdev->dev,
 					      sizeof(*p_req_ramrod_res),
 					      &req_ramrod_res_phys,
 					      GFP_KERNEL);

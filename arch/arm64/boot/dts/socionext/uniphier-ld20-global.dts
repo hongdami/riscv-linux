@@ -30,6 +30,7 @@
 		i2c3 = &i2c3;
 		i2c4 = &i2c4;
 		i2c5 = &i2c5;
+		ethernet0 = &eth;
 	};
 
 	memory@80000000 {
@@ -60,6 +61,7 @@
 			&i2s_port4
 			&spdif_port0
 			&comp_spdif_port0>;
+		hp-det-gpio = <&gpio UNIPHIER_GPIO_IRQ(0) GPIO_ACTIVE_LOW>;
 	};
 
 	spdif-out {
@@ -142,6 +144,10 @@
 	ethphy: ethphy@1 {
 		reg = <1>;
 	};
+};
+
+&usb {
+	status = "okay";
 };
 
 &nand {

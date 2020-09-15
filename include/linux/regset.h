@@ -1,11 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * User-mode machine state access
  *
  * Copyright (C) 2007 Red Hat, Inc.  All rights reserved.
- *
- * This copyrighted material is made available to anyone wishing to use,
- * modify, copy, or redistribute it subject to the terms and conditions
- * of the GNU General Public License v.2.
  *
  * Red Hat Author: Roland McGrath.
  */
@@ -323,7 +320,7 @@ static inline int user_regset_copyout_zero(unsigned int *pos,
 		if (*kbuf) {
 			memset(*kbuf, 0, copy);
 			*kbuf += copy;
-		} else if (__clear_user(*ubuf, copy))
+		} else if (clear_user(*ubuf, copy))
 			return -EFAULT;
 		else
 			*ubuf += copy;
@@ -376,7 +373,7 @@ static inline int copy_regset_to_user(struct task_struct *target,
 	if (!regset->get)
 		return -EOPNOTSUPP;
 
-	if (!access_ok(VERIFY_WRITE, data, size))
+	if (!access_ok(data, size))
 		return -EFAULT;
 
 	return regset->get(target, regset, offset, size, NULL, data);
@@ -402,7 +399,7 @@ static inline int copy_regset_from_user(struct task_struct *target,
 	if (!regset->set)
 		return -EOPNOTSUPP;
 
-	if (!access_ok(VERIFY_READ, data, size))
+	if (!access_ok(data, size))
 		return -EFAULT;
 
 	return regset->set(target, regset, offset, size, NULL, data);

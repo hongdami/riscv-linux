@@ -1,197 +1,138 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 2012 Regents of the University of California
- * Copyright (C) 2017 SiFive
+ * Copyright (C) 2017-2018 SiFive
+ * Copyright (C) 2020 Western Digital Corporation or its affiliates.
  */
+
+#define pr_fmt(fmt) "riscv-intc: " fmt
+#include <linux/atomic.h>
+#include <linux/bits.h>
+#include <linux/cpu.h>
 #include <linux/irq.h>
 #include <linux/irqchip.h>
 #include <linux/irqdomain.h>
 #include <linux/interrupt.h>
+#include <linux/module.h>
 #include <linux/of.h>
 #include <linux/smp.h>
-#include <asm/sbi.h>
 
-#define NR_RISCV_IRQS (8 * sizeof(uintptr_t))
+static struct irq_domain *intc_domain;
 
-/*
- * Possible interrupt causes:
- */
-#define INTERRUPT_CAUSE_SOFTWARE    1
-#define INTERRUPT_CAUSE_TIMER       5
-#define INTERRUPT_CAUSE_EXTERNAL    9
-
-/*
- * The high order bit of the trap cause register is always set for
- * interrupts, which allows us to differentiate them from exceptions
- * quickly.  The INTERRUPT_CAUSE_* macros don't contain that bit, so we
- * need to mask it off.
- */
-#define INTERRUPT_CAUSE_MASK	(1UL << (NR_RISCV_IRQS - 1))
-
-struct riscv_irq_data {
-	struct irq_chip		chip;
-	struct irq_domain	*domain;
-	int			hart;
-	char			name[20];
-};
-
-static DEFINE_PER_CPU(struct riscv_irq_data, riscv_irq_data);
-
-static void riscv_intc_irq(struct pt_regs *regs)
+static asmlinkage void riscv_intc_irq(struct pt_regs *regs)
 {
-	struct pt_regs *old_regs = set_irq_regs(regs);
-	unsigned long cause = csr_read(scause);
-	struct irq_domain *domain;
+	unsigned long cause = regs->cause & ~CAUSE_IRQ_FLAG;
 
-	WARN_ON((cause & INTERRUPT_CAUSE_MASK) == 0);
-	cause &= ~INTERRUPT_CAUSE_MASK;
+	if (unlikely(cause >= BITS_PER_LONG))
+		panic("unexpected interrupt cause");
 
-	irq_enter();
-
-	/*
-	 * There are three classes of interrupt: timer, software, and
-	 * external devices.  We dispatch between them here.  External
-	 * device interrupts use the generic IRQ mechanisms.
-	 */
 	switch (cause) {
-	case INTERRUPT_CAUSE_TIMER:
-		riscv_timer_interrupt();
+#ifdef CONFIG_SMP
+	case RV_IRQ_SOFT:
+		/*
+		 * We only use software interrupts to pass IPIs, so if a
+		 * non-SMP system gets one, then we don't know what to do.
+		 */
+		handle_IPI(regs);
 		break;
-	case INTERRUPT_CAUSE_SOFTWARE:
-		riscv_software_interrupt();
-		break;
+#endif
 	default:
-		domain = per_cpu(riscv_irq_data, smp_processor_id()).domain;
-		generic_handle_irq(irq_find_mapping(domain, cause));
+		handle_domain_irq(intc_domain, cause, regs);
 		break;
 	}
-
-	irq_exit();
-	set_irq_regs(old_regs);
 }
 
-static int riscv_irqdomain_map(struct irq_domain *d, unsigned int irq,
-			       irq_hw_number_t hwirq)
-{
-	struct riscv_irq_data *data = d->host_data;
+/*
+ * On RISC-V systems local interrupts are masked or unmasked by writing
+ * the SIE (Supervisor Interrupt Enable) CSR.  As CSRs can only be written
+ * on the local hart, these functions can only be called on the hart that
+ * corresponds to the IRQ chip.
+ */
 
-	irq_set_chip_and_handler(irq, &data->chip, handle_simple_irq);
-	irq_set_chip_data(irq, data);
-	irq_set_noprobe(irq);
-	irq_set_affinity(irq, cpumask_of(data->hart));
+static void riscv_intc_irq_mask(struct irq_data *d)
+{
+	csr_clear(CSR_IE, BIT(d->hwirq));
+}
+
+static void riscv_intc_irq_unmask(struct irq_data *d)
+{
+	csr_set(CSR_IE, BIT(d->hwirq));
+}
+
+static int riscv_intc_cpu_starting(unsigned int cpu)
+{
+	csr_set(CSR_IE, BIT(RV_IRQ_SOFT));
 	return 0;
 }
 
-static const struct irq_domain_ops riscv_irqdomain_ops = {
-	.map	= riscv_irqdomain_map,
-	.xlate	= irq_domain_xlate_onecell,
+static int riscv_intc_cpu_dying(unsigned int cpu)
+{
+	csr_clear(CSR_IE, BIT(RV_IRQ_SOFT));
+	return 0;
+}
+
+static struct irq_chip riscv_intc_chip = {
+	.name = "RISC-V INTC",
+	.irq_mask = riscv_intc_irq_mask,
+	.irq_unmask = riscv_intc_irq_unmask,
 };
 
-/*
- * On RISC-V systems local interrupts are masked or unmasked by writing the SIE
- * (Supervisor Interrupt Enable) CSR.  As CSRs can only be written on the local
- * hart, these functions can only be called on the hart that corresponds to the
- * IRQ chip.  They are only called internally to this module, so they BUG_ON if
- * this condition is violated rather than attempting to handle the error by
- * forwarding to the target hart, as that's already expected to have been done.
- */
-static void riscv_irq_mask(struct irq_data *d)
+static int riscv_intc_domain_map(struct irq_domain *d, unsigned int irq,
+				 irq_hw_number_t hwirq)
 {
-	struct riscv_irq_data *data = irq_data_get_irq_chip_data(d);
+	irq_set_percpu_devid(irq);
+	irq_domain_set_info(d, irq, hwirq, &riscv_intc_chip, d->host_data,
+			    handle_percpu_devid_irq, NULL, NULL);
 
-	BUG_ON(smp_processor_id() != data->hart);
-	csr_clear(sie, 1 << d->hwirq);
+	return 0;
 }
 
-static void riscv_irq_unmask(struct irq_data *d)
-{
-	struct riscv_irq_data *data = irq_data_get_irq_chip_data(d);
-
-	BUG_ON(smp_processor_id() != data->hart);
-	csr_set(sie, 1 << d->hwirq);
-}
-
-/* Callbacks for twiddling SIE on another hart. */
-static void riscv_irq_enable_helper(void *d)
-{
-	riscv_irq_unmask(d);
-}
-
-static void riscv_irq_disable_helper(void *d)
-{
-	riscv_irq_mask(d);
-}
-
-static void riscv_remote_ctrl(unsigned int cpu, void (*fn)(void *d),
-			      struct irq_data *data)
-{
-	smp_call_function_single(cpu, fn, data, true);
-}
-
-static void riscv_irq_enable(struct irq_data *d)
-{
-	struct riscv_irq_data *data = irq_data_get_irq_chip_data(d);
-
-	/*
-	 * It's only possible to write SIE on the current hart.  This jumps
-	 * over to the target hart if it's not the current one.  It's invalid
-	 * to write SIE on a hart that's not currently running.
-	 */
-	if (data->hart == smp_processor_id())
-		riscv_irq_unmask(d);
-	else if (cpu_online(data->hart))
-		riscv_remote_ctrl(data->hart, riscv_irq_enable_helper, d);
-	else
-		WARN_ON_ONCE(1);
-}
-
-static void riscv_irq_disable(struct irq_data *d)
-{
-	struct riscv_irq_data *data = irq_data_get_irq_chip_data(d);
-
-	/*
-	 * It's only possible to write SIE on the current hart.  This jumps
-	 * over to the target hart if it's not the current one.  It's invalid
-	 * to write SIE on a hart that's not currently running.
-	 */
-	if (data->hart == smp_processor_id())
-		riscv_irq_mask(d);
-	else if (cpu_online(data->hart))
-		riscv_remote_ctrl(data->hart, riscv_irq_disable_helper, d);
-	else
-		WARN_ON_ONCE(1);
-}
+static const struct irq_domain_ops riscv_intc_domain_ops = {
+	.map	= riscv_intc_domain_map,
+	.xlate	= irq_domain_xlate_onecell,
+};
 
 static int __init riscv_intc_init(struct device_node *node,
 				  struct device_node *parent)
 {
-	struct riscv_irq_data *data;
-	int hart;
+	int rc, hartid;
 
-	hart = riscv_of_processor_hart(node->parent);
-	if (hart < 0)
-		return -EIO;
+	hartid = riscv_of_parent_hartid(node);
+	if (hartid < 0) {
+		pr_warn("unable to find hart id for %pOF\n", node);
+		return 0;
+	}
 
-	data = &per_cpu(riscv_irq_data, hart);
-	snprintf(data->name, sizeof(data->name), "riscv,cpu_intc,%d", hart);
-	data->hart = hart;
-	data->chip.name = data->name;
-	data->chip.irq_mask = riscv_irq_mask;
-	data->chip.irq_unmask = riscv_irq_unmask;
-	data->chip.irq_enable = riscv_irq_enable;
-	data->chip.irq_disable = riscv_irq_disable;
-	data->domain = irq_domain_add_linear(node, NR_RISCV_IRQS,
-			&riscv_irqdomain_ops, data);
-	if (!data->domain)
-		goto error_add_linear;
+	/*
+	 * The DT will have one INTC DT node under each CPU (or HART)
+	 * DT node so riscv_intc_init() function will be called once
+	 * for each INTC DT node. We only need to do INTC initialization
+	 * for the INTC DT node belonging to boot CPU (or boot HART).
+	 */
+	if (riscv_hartid_to_cpuid(hartid) != smp_processor_id())
+		return 0;
 
-	set_handle_irq(&riscv_intc_irq);
-	pr_info("%s: %lu local interrupts mapped\n", data->name, NR_RISCV_IRQS);
+	intc_domain = irq_domain_add_linear(node, BITS_PER_LONG,
+					    &riscv_intc_domain_ops, NULL);
+	if (!intc_domain) {
+		pr_err("unable to add IRQ domain\n");
+		return -ENXIO;
+	}
+
+	rc = set_handle_irq(&riscv_intc_irq);
+	if (rc) {
+		pr_err("failed to set irq handler\n");
+		return rc;
+	}
+
+	cpuhp_setup_state(CPUHP_AP_IRQ_RISCV_STARTING,
+			  "irqchip/riscv/intc:starting",
+			  riscv_intc_cpu_starting,
+			  riscv_intc_cpu_dying);
+
+	pr_info("%d local interrupts mapped\n", BITS_PER_LONG);
+
 	return 0;
-
-error_add_linear:
-	pr_warn("%s: unable to add IRQ domain\n", data->name);
-	return -ENXIO;
 }
 
 IRQCHIP_DECLARE(riscv, "riscv,cpu-intc", riscv_intc_init);

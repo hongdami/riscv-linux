@@ -1,5 +1,5 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
- * SPDX-License-Identifier: GPL-2.0
  * Remote Controller core raw events header
  *
  * Copyright (C) 2010 by Mauro Carvalho Chehab
@@ -64,6 +64,7 @@ struct ir_raw_event_ctrl {
 	u32				bpf_sample;
 	struct bpf_prog_array __rcu	*progs;
 #endif
+#if IS_ENABLED(CONFIG_IR_NEC_DECODER)
 	struct nec_dec {
 		int state;
 		unsigned count;
@@ -71,12 +72,16 @@ struct ir_raw_event_ctrl {
 		bool is_nec_x;
 		bool necx_repeat;
 	} nec;
+#endif
+#if IS_ENABLED(CONFIG_IR_RC5_DECODER)
 	struct rc5_dec {
 		int state;
 		u32 bits;
 		unsigned count;
 		bool is_rc5x;
 	} rc5;
+#endif
+#if IS_ENABLED(CONFIG_IR_RC6_DECODER)
 	struct rc6_dec {
 		int state;
 		u8 header;
@@ -85,11 +90,15 @@ struct ir_raw_event_ctrl {
 		unsigned count;
 		unsigned wanted_bits;
 	} rc6;
+#endif
+#if IS_ENABLED(CONFIG_IR_SONY_DECODER)
 	struct sony_dec {
 		int state;
 		u32 bits;
 		unsigned count;
 	} sony;
+#endif
+#if IS_ENABLED(CONFIG_IR_JVC_DECODER)
 	struct jvc_dec {
 		int state;
 		u16 bits;
@@ -98,44 +107,57 @@ struct ir_raw_event_ctrl {
 		bool first;
 		bool toggle;
 	} jvc;
+#endif
+#if IS_ENABLED(CONFIG_IR_SANYO_DECODER)
 	struct sanyo_dec {
 		int state;
 		unsigned count;
 		u64 bits;
 	} sanyo;
+#endif
+#if IS_ENABLED(CONFIG_IR_SHARP_DECODER)
 	struct sharp_dec {
 		int state;
 		unsigned count;
 		u32 bits;
 		unsigned int pulse_len;
 	} sharp;
+#endif
+#if IS_ENABLED(CONFIG_IR_MCE_KBD_DECODER)
 	struct mce_kbd_dec {
-		struct input_dev *idev;
 		/* locks key up timer */
 		spinlock_t keylock;
 		struct timer_list rx_timeout;
-		char name[64];
-		char phys[64];
 		int state;
 		u8 header;
 		u32 body;
 		unsigned count;
 		unsigned wanted_bits;
 	} mce_kbd;
+#endif
+#if IS_ENABLED(CONFIG_IR_XMP_DECODER)
 	struct xmp_dec {
 		int state;
 		unsigned count;
 		u32 durations[16];
 	} xmp;
+#endif
+#if IS_ENABLED(CONFIG_IR_IMON_DECODER)
 	struct imon_dec {
 		int state;
 		int count;
 		int last_chk;
 		unsigned int bits;
 		bool stick_keyboard;
-		struct input_dev *idev;
-		char name[64];
 	} imon;
+#endif
+#if IS_ENABLED(CONFIG_IR_RCMM_DECODER)
+	struct rcmm_dec {
+		int state;
+		unsigned int count;
+		u32 bits;
+	} rcmm;
+#endif
 };
 
 /* Mutex for locking raw IR processing and handler change */
@@ -181,9 +203,10 @@ static inline void init_ir_raw_event_duration(struct ir_raw_event *ev,
 					      unsigned int pulse,
 					      u32 duration)
 {
-	init_ir_raw_event(ev);
-	ev->duration = duration;
-	ev->pulse = pulse;
+	*ev = (struct ir_raw_event) {
+		.duration = duration,
+		.pulse = pulse
+	};
 }
 
 /**
