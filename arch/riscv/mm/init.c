@@ -361,13 +361,16 @@ static void __init create_pgd_mapping(pgd_t *pgdp,
 		next_phys = alloc_pgd_next(va);
 		pgdp[pgd_idx] = pfn_pgd(PFN_DOWN(next_phys), PAGE_TABLE);
 		nextp = get_pgd_next_virt(next_phys);
+		__asm__ __volatile__ ("sfence.vma" : : : "memory");
 		memset(nextp, 0, PAGE_SIZE);
 	} else {
 		next_phys = PFN_PHYS(_pgd_pfn(pgdp[pgd_idx]));
 		nextp = get_pgd_next_virt(next_phys);
+		__asm__ __volatile__ ("sfence.vma" : : : "memory");
 	}
 
 	create_pgd_next_mapping(nextp, va, pa, sz, prot);
+	__asm__ __volatile__ ("sfence.vma" : : : "memory");
 }
 
 static uintptr_t __init best_map_size(phys_addr_t base, phys_addr_t size)
