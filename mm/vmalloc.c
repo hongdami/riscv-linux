@@ -2520,7 +2520,7 @@ void *__vmalloc_node_range(unsigned long size, unsigned long align,
 	clear_vm_uninitialized_flag(area);
 
 	kmemleak_vmalloc(area, size, gfp_mask);
-
+	__asm__ __volatile__ ("sfence.vma" : : : "memory");
 	return addr;
 
 fail:
