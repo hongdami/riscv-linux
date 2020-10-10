@@ -57,7 +57,7 @@ static inline void __switch_to_aux(struct task_struct *prev,
 
 extern bool has_fpu;
 #else
-#define has_fpu false
+#define has_fpu true
 #define fstate_save(task, regs) do { } while (0)
 #define fstate_restore(task, regs) do { } while (0)
 #define __switch_to_aux(__prev, __next) do { } while (0)

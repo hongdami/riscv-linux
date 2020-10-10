@@ -564,6 +564,13 @@ CONFIG_SIFIVE_PLIC=y
 # CONFIG_SLIMBUS is not set
 
 #
+# supported PMU type
+#
+CONFIG_RISCV_BASE_PMU=y
+CONFIG_FPU=y
+# end of supported PMU type
+
+#
 # File systems
 #
 # CONFIG_EXPORTFS_BLOCK_OPS is not set

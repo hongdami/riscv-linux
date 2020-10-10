@@ -119,6 +119,9 @@ struct rand_data {
 
 #include "jitterentropy.h"
 
+#include <linux/errno.h>
+#include <linux/printk.h>
+
 /***************************************************************************
  * Adaptive Proportion Test
  *
@@ -395,13 +398,15 @@ static void jent_lfsr_time(struct rand_data *ec, __u64 time, __u64 loop_cnt,
 	 */
 	if (loop_cnt)
 		fold_loop_cnt = loop_cnt;
+	//printk("[DEBUG] in_jent_lfsr_time\n");
+	//printk("[DEBUG] fold_loop_cnt:%ld\n",fold_loop_cnt);
+
 	for (j = 0; j < fold_loop_cnt; j++) {
 		new = ec->data;
 		for (i = 1; (DATA_SIZE_BITS) >= i; i++) {
 			__u64 tmp = time << (DATA_SIZE_BITS - i);
-
 			tmp = tmp >> (DATA_SIZE_BITS - 1);
-
+			////printk("[DEBUG] DATA_SIZE_BITS:%ld i:%d j:%d\n",DATA_SIZE_BITS,i,j);
 			/*
 			* Fibonacci LSFR with polynomial of
 			*  x^64 + x^61 + x^56 + x^31 + x^28 + x^23 + 1 which is
@@ -433,6 +438,9 @@ static void jent_lfsr_time(struct rand_data *ec, __u64 time, __u64 loop_cnt,
 	 */
 	if (!stuck)
 		ec->data = new;
+	
+	//printk("[DEBUG] out_jent_lfsr_time\n");
+
 }
 
 /**
@@ -697,6 +705,7 @@ void jent_entropy_collector_free(struct rand_data *entropy_collector)
 
 int jent_entropy_init(void)
 {
+	//printk("[DEBUG] IN _jent_read_entropy\n");
 	int i;
 	__u64 delta_sum = 0;
 	__u64 old_delta = 0;
@@ -733,8 +742,8 @@ int jent_entropy_init(void)
 	 *
 	 * SP800-90B requires at least 1024 initial test cycles.
 	 */
-#define TESTLOOPCOUNT 1024
-#define CLEARCACHE 100
+#define TESTLOOPCOUNT 1
+#define CLEARCACHE 1
 	for (i = 0; (TESTLOOPCOUNT + CLEARCACHE) > i; i++) {
 		__u64 time = 0;
 		__u64 time2 = 0;
@@ -818,6 +827,8 @@ int jent_entropy_init(void)
 			delta_sum += (old_delta - delta);
 		old_delta = delta;
 	}
+
+	//printk("[DEBUG] OUT _jent_read_entropy\n");
 
 	/*
 	 * we allow up to three times the time running backwards.
