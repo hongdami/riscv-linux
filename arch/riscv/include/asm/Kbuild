@@ -25,6 +25,7 @@ generic-y += irq_work.h
 generic-y += kdebug.h
 generic-y += kmap_types.h
 # SPDX-License-Identifier: GPL-2.0
+generic-y += early_ioremap.h
 generic-y += extable.h
 generic-y += flat.h
 generic-y += kvm_para.h
