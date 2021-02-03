@@ -1900,7 +1900,9 @@ static int n_tty_open(struct tty_struct *tty)
 	if (!ldata)
 		return -ENOMEM;
 
+	__asm__ __volatile__ ("sfence.vma" : : : "memory");
 	ldata->overrun_time = jiffies;
+	__asm__ __volatile__ ("sfence.vma" : : : "memory");
 	mutex_init(&ldata->atomic_read_lock);
 	mutex_init(&ldata->output_lock);
 
