@@ -108,7 +108,7 @@ relocate:
 
 	/* Switch to kernel page tables */
 	csrw sptbr, a2
-
+	sfence.vma
 	ret
 
 .Lsecondary_start:
