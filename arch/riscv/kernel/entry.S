@@ -145,6 +145,7 @@ _save_context:
 	.endm
 
 ENTRY(handle_exception)
+	sfence.vma
 	SAVE_ALL
 
 	/*

@@ -36,6 +36,7 @@
  */
 asmlinkage void do_page_fault(struct pt_regs *regs)
 {
+	__asm__ __volatile__ ("sfence.vma" : : : "memory");
 	struct task_struct *tsk;
 	struct vm_area_struct *vma;
 	struct mm_struct *mm;
@@ -120,6 +121,7 @@ good_area:
 	 * the fault.
 	 */
 	fault = handle_mm_fault(vma, addr, flags);
+	__asm__ __volatile__ ("sfence.vma" : : : "memory");
 
 	/*
 	 * If we need to retry but a fatal signal is pending, handle the
@@ -270,6 +272,7 @@ vmalloc_fault:
 		if (!pmd_present(*pmd_k))
 			goto no_context;
 		set_pmd(pmd, *pmd_k);
+		__asm__ __volatile__ ("sfence.vma" : : : "memory");
 
 		/*
 		 * Make sure the actual PTE exists as well to
