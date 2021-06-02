@@ -8,6 +8,7 @@
 #include <linux/interrupt.h>
 #include <linux/irqchip.h>
 #include <linux/irqdomain.h>
+#include <asm/sbi.h>
 
 /*
  * Possible interrupt causes:
@@ -44,6 +45,7 @@ asmlinkage void __irq_entry do_IRQ(struct pt_regs *regs, unsigned long cause)
 #endif
 	case INTERRUPT_CAUSE_EXTERNAL:
 		handle_arch_irq(regs);
+		sbi_plic_eoi();
 		break;
 	default:
 		panic("unexpected interrupt cause");
