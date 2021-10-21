@@ -54,6 +54,7 @@ static inline int pud_bad(pud_t pud)
 static inline void set_pud(pud_t *pudp, pud_t pud)
 {
 	*pudp = pud;
+	__asm__ __volatile__ ("sfence.vma" : : : "memory");
 }
 
 static inline void pud_clear(pud_t *pudp)

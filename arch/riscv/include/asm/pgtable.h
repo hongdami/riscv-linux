@@ -114,6 +114,7 @@ static inline int pmd_bad(pmd_t pmd)
 static inline void set_pmd(pmd_t *pmdp, pmd_t pmd)
 {
 	*pmdp = pmd;
+	__asm__ __volatile__ ("sfence.vma" : : : "memory");
 }
 
 static inline void pmd_clear(pmd_t *pmdp)

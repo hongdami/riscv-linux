@@ -272,7 +272,6 @@ vmalloc_fault:
 		if (!pmd_present(*pmd_k))
 			goto no_context;
 		set_pmd(pmd, *pmd_k);
-		__asm__ __volatile__ ("sfence.vma" : : : "memory");
 
 		/*
 		 * Make sure the actual PTE exists as well to
