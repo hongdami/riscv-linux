@@ -343,9 +343,12 @@ static inline int ptep_test_and_clear_young(struct vm_area_struct *vma,
 					    unsigned long address,
 					    pte_t *ptep)
 {
+	int ret;
 	if (!pte_young(*ptep))
 		return 0;
-	return test_and_clear_bit(_PAGE_ACCESSED_OFFSET, &pte_val(*ptep));
+	ret = test_and_clear_bit(_PAGE_ACCESSED_OFFSET, &pte_val(*ptep));
+	__asm__ __volatile__ ("sfence.vma" : : : "memory");
+	return ret;
 }
 
 #define __HAVE_ARCH_PTEP_SET_WRPROTECT
@@ -353,6 +356,7 @@ static inline void ptep_set_wrprotect(struct mm_struct *mm,
 				      unsigned long address, pte_t *ptep)
 {
 	atomic_long_and(~(unsigned long)_PAGE_WRITE, (atomic_long_t *)ptep);
+	__asm__ __volatile__ ("sfence.vma" : : : "memory");
 }
 
 #define __HAVE_ARCH_PTEP_CLEAR_YOUNG_FLUSH
