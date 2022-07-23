@@ -487,7 +487,10 @@ static inline int ptep_clear_flush_young(struct vm_area_struct *vma,
 	 * shouldn't really matter because there's no real memory
 	 * pressure for swapout to react to. ]
 	 */
-	return ptep_test_and_clear_young(vma, address, ptep);
+  // NOTE: magic-modified by ZZF, still flush TLB
+	int clear_result = ptep_test_and_clear_young(vma, address, ptep);
+  update_mmu_cache(vma, address, ptep);
+  return clear_result;
 }
 
 /*
