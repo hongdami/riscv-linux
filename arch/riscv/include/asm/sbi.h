@@ -26,6 +26,8 @@
 #define SBI_REMOTE_SFENCE_VMA_ASID 7
 #define SBI_SHUTDOWN 8
 #define SBI_PLIC_EOI 9
+#define SBI_SET_PERF 10
+#define SBI_GET_PERF 11
 
 #define SBI_CALL(which, arg0, arg1, arg2) ({			\
 	register uintptr_t a0 asm ("a0") = (uintptr_t)(arg0);	\

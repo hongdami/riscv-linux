@@ -73,3 +73,13 @@ SYSCALL_DEFINE3(riscv_flush_icache, uintptr_t, start, uintptr_t, end,
 
 	return 0;
 }
+
+#include <asm/sbi.h>
+
+SYSCALL_DEFINE2(riscv_set_perf, uint64_t, csr, uint64_t, data) {
+	return SBI_CALL_2(SBI_SET_PERF, csr, data);
+}
+
+SYSCALL_DEFINE1(riscv_get_perf, uint64_t, csr) {
+	return SBI_CALL_1(SBI_GET_PERF, csr);
+}
