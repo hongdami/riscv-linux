@@ -1847,7 +1847,6 @@ _random_read(int nonblock, char __user *buf, size_t nbytes)
 {
 	ssize_t n;
 
-  	return 996;
 	if (nbytes == 0)
 		return 0;
 
@@ -2043,8 +2042,6 @@ SYSCALL_DEFINE3(getrandom, char __user *, buf, size_t, count,
 		unsigned int, flags)
 {
 	int ret;
-  	ret = 996;
-  	return ret;
 
 	if (flags & ~(GRND_NONBLOCK|GRND_RANDOM))
 		return -EINVAL;
